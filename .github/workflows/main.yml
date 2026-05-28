@@ -4,14 +4,8 @@ on:
 
 jobs:
   gartic-bot:
-    # Linux runner pool is wholly separate from the Windows pools, so when
-    # windows-latest / windows-2022 say "all runners busy" this label often
-    # picks up immediately. Bonus: Linux Camoufox runs slightly hotter than
-    # Windows (no Defender, no Update Orchestrator, no DWM compositing) and
-    # ubuntu-* minutes are billed at 1x vs Windows' 2x.
     runs-on: ubuntu-24.04
-    timeout-minutes: 358          # 2-min headroom under the 360 cap so the
-                                  # successor-dispatch step always gets a slot.
+    timeout-minutes: 358
 
     steps:
       - name: 1. Aggressive system tuning (services, CPU, network, FS)
@@ -20,8 +14,6 @@ jobs:
           echo "=== Linux system tuning for Camoufox throughput ==="
 
           # ---- Stop services that wake to consume CPU ----
-          # snapd is the loudest on Ubuntu runners (polls store + indexes
-          # mounts). unattended-upgrades wakes apt every few minutes.
           for svc in snapd snapd.socket unattended-upgrades udisks2 \
                      packagekit ModemManager rsyslog avahi-daemon \
                      cron multipathd; do
@@ -50,8 +42,6 @@ jobs:
           done
 
           # ---- TCP: BBR congestion control + larger socket buffers ----
-          # BBR is the Linux equivalent of Windows' multimedia-throttle removal:
-          # saturates Cloudflare's edge in fewer RTTs.
           sudo modprobe tcp_bbr 2>/dev/null
           sudo sysctl -w net.core.default_qdisc=fq                2>/dev/null
           sudo sysctl -w net.ipv4.tcp_congestion_control=bbr      2>/dev/null
@@ -61,8 +51,7 @@ jobs:
           sudo sysctl -w net.ipv4.tcp_wmem='4096 65536 67108864'  2>/dev/null
           sudo sysctl -w net.ipv4.tcp_fastopen=3                  2>/dev/null
 
-          # ---- IPv6 off (gartic + Cloudflare reachable over v4; skips AAAA
-          #      lookups and Happy-Eyeballs racing).
+          # ---- IPv6 off
           sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1     2>/dev/null
           sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null
 
@@ -71,10 +60,10 @@ jobs:
           [ -w /sys/kernel/mm/transparent_hugepage/enabled ] && \
               echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null
 
-          # ---- Kernel: kill the soft-lockup watchdog (small but real CPU% sink) ----
+          # ---- Kernel: kill the soft-lockup watchdog ----
           sudo sysctl -w kernel.watchdog=0 2>/dev/null
 
-          # ---- Drop the GitHub Actions runner agent priority so Camoufox dominates ----
+          # ---- Drop the GitHub Actions runner agent priority ----
           pgrep -f 'Runner\.Listener|Runner\.Worker' \
               | xargs -r -I{} sudo renice -n 19 -p {} 2>/dev/null
 
@@ -85,19 +74,220 @@ jobs:
           sudo mkdir -p /opt/camoufox
           sudo chown "$USER":"$USER" /opt/camoufox
 
-          # generator.py is embedded as base64 to keep this YAML self-contained,
-          # byte-for-byte identical to the Windows variants. (Single-quoted so
-          # bash performs no expansion on the b64 alphabet.)
-          GEN_B64='aW1wb3J0IG9zDQppbXBvcnQgYXN5bmNpbwppbXBvcnQgdGltZQppbXBvcnQgYWlvaHR0cApmcm9tIGNhbW91Zm94LmFzeW5jX2FwaSBpbXBvcnQgQXN5bmNDYW1vdWZveAoKIyBDYW1vdWZveCBwb3J0IG9mIEBtYWdpanVkYXIncyBwdXBwZXRlZXIgcGF0dGVybiAoc2hpcHMgZXZlcnkgdG9rZW4gdG8gbW9vbmZpdmUpCgpSRUxBWV9VUkwgICAgICAgICAgICAgPSAiaHR0cHM6Ly9tb2hhbmFkaW5vLmR1Y2tkbnMub3JnOjg0NDMvYWRkIgpUQVJHRVRfVVJMICAgICAgICAgICAgPSAiaHR0cHM6Ly9nYXJ0aWMuaW8iClNJVEVLRVkgICAgICAgICAgICAgICA9ICIweDRBQUFBQUFCQlBLYUliTnduUEVmU28iDQpBVVRIX1NFQ1JFVCAgICAgICAgICAgPSBvcy5lbnZpcm9uLmdldCgiQVVUSF9TRUNSRVQiLCAiIikKTlVNX0JST1dTRVJTICAgICAgICAgID0gMSAgICAgICAgICAgICAgICAgICAgICAgIyBzaW5nbGUgQ2Ftb3Vmb3ggcHJvY2VzcyDigJQgaGFsZiB0aGUgT1Mgb3ZlcmhlYWQgdnMgMgpOVU1fVEFCUyAgICAgICAgICAgICAgPSA2ICAgICAgICAgICAgICAgICAgICAgICAjIHRhYnMgcGVyIGJyb3dzZXIgKGVhY2ggZ2V0cyBpdHMgb3duIEJyb3dzZXJDb250ZXh0KQpOVU1fTEFORVMgICAgICAgICAgICAgPSA1ICAgICAgICAgICAgICAgICAgICAgICAjIHBhcmFsbGVsIHR1cm5zdGlsZSB3aWRnZXRzIHBlciB0YWIKTEFORV9TVEFHR0VSX01TICAgICAgID0gNTAwICAgICAgICAgICAgICAgICAgICAgIyBkZWxheSBiZXR3ZWVuIHN0YXJ0aW5nIGVhY2ggbGFuZSAoYXZvaWRzIGJ1cnN0KQpSRUxPQURfSU5URVJWQUxfTVMgICAgPSA2MCAqIDYwXzAwMCAgICAgICAgICAgICAjIGVmZmVjdGl2ZWx5IGRpc2FibGVkIOKAlCB3aWRnZXRzIHJlc2V0KCkgaW4gcGxhY2UKQlJPV1NFUl9MSUZFVElNRV9NUyAgID0gNTAgKiA2MF8wMDAgICAgICAgICAgICAgIyB+NTAgbWluIGxpZmV0aW1lOyByZWxvYWQgd291bGQgbmV2ZXIgZmlyZSBmaXJzdAoKIyBDb3VudGVycyBmb3IgdG9rZW4tdmVyc2lvbiBkaWFnbm9zdGljcy4gQ2xvdWRmbGFyZSdzIGxlYWRpbmcgIjAuIi8iMS4iIHByZWZpeAojIGlzIGl0cyBpbnRlcm5hbCByb3RhdGlvbi92ZXJzaW9uIChOT1QgYSByaXNrIHNjb3JlKSDigJQgYm90aCBwYXNzIHNpdGV2ZXJpZnkuCiMgVGhlIGljZWJvdCBHbyBzZXJ2ZXIncyBvbGQgaGFyZGNvZGVkIGBbOjJdICE9ICIxLiJgIGZpbHRlciBhdCB0dXJuc3RpbGUuZ286NzkKIyBzaWxlbnRseSByZWplY3RlZCBldmVyeSAiMC4iIHRva2VuIHVudGlsIDIwMjYtMDUtMDQ7IGxvZ2dpbmcgYm90aCBsZXRzIHVzCiMgc3BvdCBhIHJlZ3Jlc3Npb24gdGhlcmUgaW1tZWRpYXRlbHkuCl9sZXZlbF9jb3VudHMgPSB7IjAiOiAwLCAiMSI6IDAsICJvdGhlciI6IDB9CgpSRU5ERVJFUl9KUyA9ICIiIgooZnVuY3Rpb24gKCkgewogIGRvY3VtZW50LmJvZHkuaW5uZXJIVE1MID0gJyc7CiAgZm9yICh2YXIgaSA9IDA7IGkgPCBfX05VTV9MQU5FU19fOyBpKyspIHsKICAgIHZhciBkaXYgPSBkb2N1bWVudC5jcmVhdGVFbGVtZW50KCdkaXYnKTsKICAgIGRpdi5pZCA9ICdrdXR1XycgKyBpOwogICAgZG9jdW1lbnQuYm9keS5hcHBlbmRDaGlsZChkaXYpOwogIH0KICB2YXIgc2NyaXB0ID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnc2NyaXB0Jyk7CiAgc2NyaXB0LnNyYyA9ICdodHRwczovL2NoYWxsZW5nZXMuY2xvdWRmbGFyZS5jb20vdHVybnN0aWxlL3YwL2FwaS5qcz9yZW5kZXI9ZXhwbGljaXQnOwogIHNjcmlwdC5vbmxvYWQgPSBmdW5jdGlvbiAoKSB7CiAgICBmb3IgKHZhciBpID0gMDsgaSA8IF9fTlVNX0xBTkVTX187IGkrKykgewogICAgICAoZnVuY3Rpb24gKGlkeCkgewogICAgICAgIHNldFRpbWVvdXQoZnVuY3Rpb24gKCkgewogICAgICAgICAgdmFyIHdpZGdldElkID0gd2luZG93LnR1cm5zdGlsZS5yZW5kZXIoJyNrdXR1XycgKyBpZHgsIHsKICAgICAgICAgICAgc2l0ZWtleTogJ19fU0lURUtFWV9fJywKICAgICAgICAgICAgY2FsbGJhY2s6IGZ1bmN0aW9uICh0b2tlbikgewogICAgICAgICAgICAgIGNvbnNvbGUubG9nKCdUOicgKyB0b2tlbik7CiAgICAgICAgICAgICAgd2luZG93LnR1cm5zdGlsZS5yZXNldCh3aWRnZXRJZCk7CiAgICAgICAgICAgIH0sCiAgICAgICAgICAgICdlcnJvci1jYWxsYmFjayc6IGZ1bmN0aW9uICgpIHsgd2luZG93LnR1cm5zdGlsZS5yZXNldCh3aWRnZXRJZCk7IH0KICAgICAgICAgIH0pOwogICAgICAgIH0sIGlkeCAqIF9fTEFORV9TVEFHR0VSX01TX18pOwogICAgICB9KShpKTsKICAgIH0KICB9OwogIGRvY3VtZW50LmhlYWQuYXBwZW5kQ2hpbGQoc2NyaXB0KTsKfSkoKTsKIiIiCgoKZGVmIF9maWxsKGpzKToKICAgIHJldHVybiAoCiAgICAgICAganMucmVwbGFjZSgiX19OVU1fTEFORVNfXyIsIHN0cihOVU1fTEFORVMpKQogICAgICAgICAgLnJlcGxhY2UoIl9fTEFORV9TVEFHR0VSX01TX18iLCBzdHIoTEFORV9TVEFHR0VSX01TKSkKICAgICAgICAgIC5yZXBsYWNlKCJfX1NJVEVLRVlfXyIsIFNJVEVLRVkpCiAgICApCgoKYXN5bmMgZGVmIGluamVjdF9yZW5kZXJlcihwYWdlKToKICAgICMgVXNlIHBhZ2UuYWRkX3NjcmlwdF90YWcgKGFwcGVuZHMgYSByZWFsIDxzY3JpcHQ+IGVsZW1lbnQgdG8gdGhlIGRvY3VtZW50KQogICAgIyByYXRoZXIgdGhhbiBwYWdlLmV2YWx1YXRlLCBzbyB0aGUgc2NyaXB0IHJ1bnMgaW4gdGhlIHBhZ2UncyBtYWluIHdvcmxkLgogICAgIyBDYW1vdWZveCdzIGV2YWx1YXRlIGlzb2xhdGlvbiBtYWtlcyB0aGUgbWFpbiB3b3JsZCdzIGB3aW5kb3cudHVybnN0aWxlYAogICAgIyBpbnZpc2libGUgdG8gUHl0aG9uLXNpZGUgY2hlY2tzLCBzbyB3ZSBsZXQgdGhlIGluLXBhZ2Ugc2NyaXB0Lm9ubG9hZAogICAgIyBoYW5kbGVyIGRvIHRoZSByZW5kZXIgb25jZSBDbG91ZGZsYXJlJ3MgQVBJIGhhcyBsb2FkZWQuCiAgICBhd2FpdCBwYWdlLmFkZF9zY3JpcHRfdGFnKGNvbnRlbnQ9X2ZpbGwoUkVOREVSRVJfSlMpKQoKCl9sYXN0X2Vycl9yZXBvcnQgPSBbMC4wXQpfZXJyX3JlcG9ydF9taW5faW50ZXJ2YWwgPSA1LjAKCgpfbGFzdF9lcnJfcmVwb3J0ID0gWzAuMF0KX2Vycl9yZXBvcnRfbWluX2ludGVydmFsID0gNS4wCgoKX2xhc3RfZXJyX3JlcG9ydCA9IFswLjBdCl9lcnJfcmVwb3J0X21pbl9pbnRlcnZhbCA9IDUuMAoKCmFzeW5jIGRlZiBfcG9zdF90b2tlbihzZXNzaW9uLCB0b2tlbik6CiAgICB0cnk6CiAgICAgICAgYXN5bmMgd2l0aCBzZXNzaW9uLnBvc3QoCiAgICAgICAgICAgIFJFTEFZX1VSTCwKICAgICAgICAgICAganNvbj17InRva2VuIjogdG9rZW59LAogICAgICAgICAgICBoZWFkZXJzPXsiWC1BdXRoIjogQVVUSF9TRUNSRVR9LAogICAgICAgICAgICBzc2w9VHJ1ZSwKICAgICAgICApIGFzIHJlc3A6CiAgICAgICAgICAgIGlmIHJlc3Auc3RhdHVzID49IDQwMDoKICAgICAgICAgICAgICAgIG5vdyA9IHRpbWUubW9ub3RvbmljKCkKICAgICAgICAgICAgICAgIGlmIG5vdyAtIF9sYXN0X2Vycl9yZXBvcnRbMF0gPj0gX2Vycl9yZXBvcnRfbWluX2ludGVydmFsOgogICAgICAgICAgICAgICAgICAgIF9sYXN0X2Vycl9yZXBvcnRbMF0gPSBub3cKICAgICAgICAgICAgICAgICAgICBib2R5ID0gYXdhaXQgcmVzcC50ZXh0KCkKICAgICAgICAgICAgICAgICAgICBzbmlwcGV0ID0gYm9keVs6MjAwXS5yZXBsYWNlKCJcbiIsICIgIikKICAgICAgICAgICAgICAgICAgICBwcmludChmIltyZWxheV0gSFRUUCB7cmVzcC5zdGF0dXN9IGZyb20ge1JFTEFZX1VSTH06IHtzbmlwcGV0fSIpCiAgICAgICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgICAgIGF3YWl0IHJlc3AucmVhZCgpCiAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICBhd2FpdCByZXNwLnJlYWQoKQogICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgIG5vdyA9IHRpbWUubW9ub3RvbmljKCkKICAgICAgICBpZiBub3cgLSBfbGFzdF9lcnJfcmVwb3J0WzBdID49IF9lcnJfcmVwb3J0X21pbl9pbnRlcnZhbDoKICAgICAgICAgICAgX2xhc3RfZXJyX3JlcG9ydFswXSA9IG5vdwogICAgICAgICAgICBwcmludChmIltyZWxheV0gUE9TVCBleGNlcHRpb246IHtlIXJ9IikKCmFzeW5jIGRlZiBfcm91dGVfaGFuZGxlcihyb3V0ZSk6CiAgICAjIEJsb2NrIGV2ZXJ5IHJlcXVlc3QgdGhhdCBpc24ndCB0aGUgdG9wLWxldmVsIGRvY3VtZW50IG5hdmlnYXRpb24gb3IgYQogICAgIyBDbG91ZGZsYXJlIFR1cm5zdGlsZSByZXNvdXJjZS4gZ2FydGljLmlvJ3MgQ1NTL0pTL2ZvbnRzL2ltYWdlcy9hZHMvdHJhY2tpbmcKICAgICMgYXJlIG5vdCBuZWVkZWQgKHdlIHdpcGUgdGhlIGJvZHkgYW55d2F5KSwgYW5kIGJsb2NraW5nIHRoZW0gaXMgdGhlIHNpbmdsZQogICAgIyBiaWdnZXN0IENQVS9iYW5kd2lkdGggd2luIG9uIGEgY29uc3RyYWluZWQgcnVubmVyLgogICAgcmVxdWVzdCA9IHJvdXRlLnJlcXVlc3QKICAgIGlmIHJlcXVlc3QucmVzb3VyY2VfdHlwZSA9PSAiZG9jdW1lbnQiOgogICAgICAgIGF3YWl0IHJvdXRlLmNvbnRpbnVlXygpCiAgICAgICAgcmV0dXJuCiAgICBpZiAiY2hhbGxlbmdlcy5jbG91ZGZsYXJlLmNvbSIgaW4gcmVxdWVzdC51cmw6CiAgICAgICAgYXdhaXQgcm91dGUuY29udGludWVfKCkKICAgICAgICByZXR1cm4KICAgIGF3YWl0IHJvdXRlLmFib3J0KCkKCgphc3luYyBkZWYgc2V0dXBfdGFiKHBhZ2UsIHRhYl9pZCwgc2Vzc2lvbik6CiAgICBsYXN0X3RpbWUgPSBbdGltZS5tb25vdG9uaWMoKV0KCiAgICBkZWYgb25fY29uc29sZShtc2cpOgogICAgICAgIHRleHQgPSBtc2cudGV4dAogICAgICAgIGlmIHRleHQuc3RhcnRzd2l0aCgiVDoiKToKICAgICAgICAgICAgbm93ID0gdGltZS5tb25vdG9uaWMoKQogICAgICAgICAgICBlbGFwc2VkID0gbm93IC0gbGFzdF90aW1lWzBdCiAgICAgICAgICAgIGxhc3RfdGltZVswXSA9IG5vdwogICAgICAgICAgICB0b2tlbiA9IHRleHRbMjpdCiAgICAgICAgICAgIGxldmVsID0gdG9rZW5bMF0gaWYgdG9rZW4gYW5kIHRva2VuWzE6Ml0gPT0gIi4iIGVsc2UgIm90aGVyIgogICAgICAgICAgICBpZiBsZXZlbCBpbiBfbGV2ZWxfY291bnRzOgogICAgICAgICAgICAgICAgX2xldmVsX2NvdW50c1tsZXZlbF0gKz0gMQogICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgX2xldmVsX2NvdW50c1sib3RoZXIiXSArPSAxCiAgICAgICAgICAgIG1hcmtlciA9ICJceDFiWzMybUwx4pyTXHgxYlswbSIgaWYgbGV2ZWwgPT0gIjEiIGVsc2UgIlx4MWJbMzNtTDBceDFiWzBtIgogICAgICAgICAgICBzaG9ydCA9IHRva2VuWzoyNF0gKyAiLi4uIiArIHRva2VuWy0xMjpdCiAgICAgICAgICAgIHRvdGFscyA9IGYiTDE6e19sZXZlbF9jb3VudHNbJzEnXX0gTDA6e19sZXZlbF9jb3VudHNbJzAnXX0iCiAgICAgICAgICAgIHByaW50KGYiW3RhYnt0YWJfaWR9IHttYXJrZXJ9XSB7c2hvcnR9IHwgXHgxYlszMW17ZWxhcHNlZDouMWZ9c1x4MWJbMG0gfCB7dG90YWxzfSIpCiAgICAgICAgICAgIGFzeW5jaW8uY3JlYXRlX3Rhc2soX3Bvc3RfdG9rZW4oc2Vzc2lvbiwgdG9rZW4pKQoKICAgIHBhZ2Uub24oImNvbnNvbGUiLCBvbl9jb25zb2xlKQogICAgIyBJbnN0YWxsIHRoZSByb3V0ZSBoYW5kbGVyIEJFRk9SRSBnb3RvIHNvIHRoZSB2ZXJ5IGZpcnN0IHJlcXVlc3QgaXMgZmlsdGVyZWQuCiAgICBhd2FpdCBwYWdlLnJvdXRlKCIqKi8qIiwgX3JvdXRlX2hhbmRsZXIpCgogICAgIyBnYXJ0aWMuaW8ncyBgbG9hZGAgZXZlbnQgaXMgdW5yZWxpYWJsZSB1bmRlciBoZWF2eSBjb25jdXJyZW5jeSAoaXQgdGltZWQKICAgICMgb3V0IGF0IDMwcyBpbiB0ZXN0aW5nLCBsZWF2aW5nIGRvY3VtZW50LmJvZHkgbnVsbCkuIGBkb21jb250ZW50bG9hZGVkYCBpcwogICAgIyBzdWZmaWNpZW50IOKAlCB0aGUgcmVuZGVyZXIgb25seSBuZWVkcyBib2R5IHRvIGV4aXN0LiBXaXRoIHJlcXVlc3QgYmxvY2tpbmcKICAgICMgaW4gcGxhY2UgdGhlcmUgYXJlIG5vIHRoaXJkLXBhcnR5IHJlcXVlc3RzIHRvIHdhaXQgb24sIHNvIHdlIHNraXAgdGhlCiAgICAjIG5ldHdvcmtpZGxlIHNldHRsZSBlbnRpcmVseTsgYSBzaG9ydCAwLjVzIHNsZWVwIGlzIGVub3VnaCBmb3IgcGFyc2UuCiAgICB0cnk6CiAgICAgICAgYXdhaXQgcGFnZS5nb3RvKFRBUkdFVF9VUkwsIHdhaXRfdW50aWw9ImRvbWNvbnRlbnRsb2FkZWQiLCB0aW1lb3V0PTYwMDAwKQogICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICBwYXNzCiAgICBhd2FpdCBhc3luY2lvLnNsZWVwKDAuNSkKICAgICMgZ2FydGljLmlvIGhhcyBhIFJlcG9ydC1Pbmx5IENTUCB0aGF0IHN1cmZhY2VzIGFzIGFuIGBhZGRfc2NyaXB0X3RhZ2AgZXJyb3IKICAgICMgaW4gUGxheXdyaWdodCB3aGVuIHRoZSByZW5kZXJlciBjcmVhdGVzIHRoZSBDbG91ZGZsYXJlIFR1cm5zdGlsZSBzY3JpcHQgdGFnLAogICAgIyBidXQgdGhlIHNjcmlwdCBzdGlsbCBleGVjdXRlcyAocmVwb3J0LW9ubHkgZG9lc24ndCBlbmZvcmNlKS4gRXJyb3JzIGFyZQogICAgIyBzaWxlbnRseSBzd2FsbG93ZWQgaGVyZSBmb3IgdGhhdCByZWFzb24uCiAgICB0cnk6CiAgICAgICAgYXdhaXQgaW5qZWN0X3JlbmRlcmVyKHBhZ2UpCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIHBhc3MKCiAgICBhc3luYyBkZWYgYXV0b19jbGlja2VyKCk6CiAgICAgICAgIyBTbG93ZWQgZnJvbSAwLjVzIHRvIDNzLiBNYW5hZ2VkIFR1cm5zdGlsZSBhdXRvLWNvbXBsZXRlcyBtb3N0CiAgICAgICAgIyBjaGFsbGVuZ2VzIHdpdGhvdXQgYW4gaW50ZXJhY3RpdmUgY2xpY2s7IHRoZSBjbGlja2VyIGV4aXN0cyBvbmx5CiAgICAgICAgIyBhcyBhIGZhbGxiYWNrIGZvciB0aGUgcmFyZSBpbnRlcmFjdGl2ZSBjaGFsbGVuZ2UuIEF0IDAuNXMgw5cgMzAKICAgICAgICAjIHdpZGdldHMgaXQgd2FzIGJ1cm5pbmcgfjEyMCBJUEMgY2xpY2sgYXR0ZW1wdHMvc2VjIGZvciBhbG1vc3Qgbm8KICAgICAgICAjIHRva2Vucy4gM3Mga2VlcHMgdGhlIHNhZmV0eSBuZXQgYXQgMS82IHRoZSBjb3N0LgogICAgICAgIHdoaWxlIG5vdCBwYWdlLmlzX2Nsb3NlZCgpOgogICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICBmb3IgZnJhbWUgaW4gcGFnZS5mcmFtZXM6CiAgICAgICAgICAgICAgICAgICAgaWYgInR1cm5zdGlsZSIgaW4gZnJhbWUudXJsOgogICAgICAgICAgICAgICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBhd2FpdCBmcmFtZS5jbGljaygiI2NoYWxsZW5nZS1zdGFnZSIpCiAgICAgICAgICAgICAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBwYXNzCiAgICAgICAgICAgICAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGF3YWl0IGZyYW1lLmNsaWNrKCdpbnB1dFt0eXBlPSJjaGVja2JveCJdJykKICAgICAgICAgICAgICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHBhc3MKICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgICAgIHBhc3MKICAgICAgICAgICAgYXdhaXQgYXN5bmNpby5zbGVlcCgzLjApCgogICAgYXN5bmMgZGVmIHJlbG9hZF9sb29wKCk6CiAgICAgICAgd2hpbGUgbm90IHBhZ2UuaXNfY2xvc2VkKCk6CiAgICAgICAgICAgIGF3YWl0IGFzeW5jaW8uc2xlZXAoUkVMT0FEX0lOVEVSVkFMX01TIC8gMTAwMCkKICAgICAgICAgICAgaWYgcGFnZS5pc19jbG9zZWQoKToKICAgICAgICAgICAgICAgIHJldHVybgogICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICBhd2FpdCBwYWdlLnJlbG9hZCh3YWl0X3VudGlsPSJkb21jb250ZW50bG9hZGVkIiwgdGltZW91dD02MDAwMCkKICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgICAgIHBhc3MKICAgICAgICAgICAgaWYgcGFnZS5pc19jbG9zZWQoKToKICAgICAgICAgICAgICAgIHJldHVybgogICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICBhd2FpdCBpbmplY3RfcmVuZGVyZXIocGFnZSkKICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICAgICAgICAgIHBhc3MKCiAgICBhc3luY2lvLmNyZWF0ZV90YXNrKGF1dG9fY2xpY2tlcigpKQogICAgYXN5bmNpby5jcmVhdGVfdGFzayhyZWxvYWRfbG9vcCgpKQoKCmFzeW5jIGRlZiBydW5fYnJvd3Nlcihicm93c2VyX251bSwgc2Vzc2lvbik6CiAgICB3aGlsZSBUcnVlOgogICAgICAgIHRyeToKICAgICAgICAgICAgcHJpbnQoZiJbYnJvd3NlciB7YnJvd3Nlcl9udW19XSBsYXVuY2hpbmcgZnJlc2ggQ2Ftb3Vmb3guLi4iKQogICAgICAgICAgICBhc3luYyB3aXRoIEFzeW5jQ2Ftb3Vmb3goCiAgICAgICAgICAgICAgICBoZWFkbGVzcz1UcnVlLAogICAgICAgICAgICAgICAgZGlzYWJsZV9jb29wPVRydWUsCiAgICAgICAgICAgICAgICAjIGh1bWFuaXplPUZhbHNlIOKAlCBodW1hbml6ZSBzcGF3bnMgY3Vyc29yLW1vdmVtZW50IHdvcmtlcnMgdGhhdAogICAgICAgICAgICAgICAgIyBjb3N0IENQVSBhbmQgZG9uJ3QgaGVscCBpbiB0aGUgaGVhZGxlc3MgVHVybnN0aWxlIGZsb3cgKHdlCiAgICAgICAgICAgICAgICAjIGNsaWNrIHZpYSBQbGF5d3JpZ2h0IGZyYW1lIEFQSXMsIGFuZCBUdXJuc3RpbGUgZG9lc24ndCB3YXRjaAogICAgICAgICAgICAgICAgIyBjdXJzb3IgcGF0aHMgaW4gaGVhZGxlc3MgbW9kZSkuIFB1cmUgb3ZlcmhlYWQgb24gYSA0LXZDUFUgYm94LgogICAgICAgICAgICAgICAgaHVtYW5pemU9RmFsc2UsCiAgICAgICAgICAgICAgICBvcz0oIndpbmRvd3MiLCAibWFjb3MiLCAibGludXgiKSwKICAgICAgICAgICAgICAgICMgQ29sbGFwc2UgRmlyZWZveCdzIHBlci1zaXRlL3Blci1jb250ZXh0IHByb2Nlc3MgdHJlZS4gRGVmYXVsdAogICAgICAgICAgICAgICAgIyBwcm9kdWNlZCAxMyBjb250ZW50IHByb2Nlc3NlcyBmb3IgNiBjb250ZXh0cywgcGVnZ2luZyBhIDQgdkNQVQogICAgICAgICAgICAgICAgIyBydW5uZXIgYXQgMTAwJSBiZWZvcmUgYW55IHdpZGdldCBnZXRzIGN5Y2xlcy4gcHJvY2Vzc0NvdW50PTQKICAgICAgICAgICAgICAgICMgY2FwcyBGaXJlZm94IGF0IG9uZSBjb250ZW50IHByb2Nlc3MgcGVyIHZDUFUg4oCUIGVub3VnaCBKUy1lbmdpbmUKICAgICAgICAgICAgICAgICMgcGFyYWxsZWxpc20gdG8ga2VlcCB3aWRnZXRzIHNvbHZpbmcgd2l0aG91dCBJUEMgdGhyYXNoLiBHb2luZwogICAgICAgICAgICAgICAgIyB0byAxIG92ZXItc2VyaWFsaXplcyAodmVyaWZpZWQgbG9jYWxseTogNjIgdG9rZW5zIGluIDkwcyB2cwogICAgICAgICAgICAgICAgIyAzNzQgd2l0aCBkZWZhdWx0KS4gZmlzc2lvbi5hdXRvc3RhcnQ9ZmFsc2Ugc3RvcHMgY3Jvc3Mtb3JpZ2luCiAgICAgICAgICAgICAgICAjIGlmcmFtZXMgKFR1cm5zdGlsZSBpcyBjcm9zcy1vcmlnaW4gZnJvbSBnYXJ0aWMuaW8pIGZyb20KICAgICAgICAgICAgICAgICMgc3Bhd25pbmcgdGhlaXIgb3duIHByb2Nlc3NlcyBvbiB0b3Agb2YgdGhlIGNhcC4KICAgICAgICAgICAgICAgIGZpcmVmb3hfdXNlcl9wcmVmcz17CiAgICAgICAgICAgICAgICAgICAgImZpc3Npb24uYXV0b3N0YXJ0IjogRmFsc2UsCiAgICAgICAgICAgICAgICAgICAgImRvbS5pcGMucHJvY2Vzc0NvdW50IjogNCwKICAgICAgICAgICAgICAgICAgICAiZG9tLmlwYy5wcm9jZXNzQ291bnQud2ViSXNvbGF0ZWQiOiA0LAogICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgKSBhcyBicm93c2VyOgogICAgICAgICAgICAgICAgIyBFYWNoIHRhYiBnZXRzIGl0cyBvd24gQnJvd3NlckNvbnRleHQg4oCUIGZyZXNoIGNvb2tpZXMvc3RvcmFnZS8KICAgICAgICAgICAgICAgICMgbG9jYWxTdG9yYWdlL0luZGV4ZWREQiBwYXJ0aXRpb24sIGVxdWl2YWxlbnQgdG8gRmlyZWZveCdzCiAgICAgICAgICAgICAgICAjIE11bHRpLUFjY291bnQgQ29udGFpbmVycy4gQ2xvdWRmbGFyZSBzY29yZXMgZWFjaCBjb250ZXh0IGFzIGEKICAgICAgICAgICAgICAgICMgZGlzdGluY3QgdXNlciBzaGFyaW5nIHRoZSBJUCwgd2hpY2ggcmFpc2VzIHRocm91Z2hwdXQgdnMgYWxsCiAgICAgICAgICAgICAgICAjIHRhYnMgc2hhcmluZyBvbmUgY29va2llIGphci4KICAgICAgICAgICAgICAgICMgbmV3X2NvbnRleHQoKS9uZXdfcGFnZSgpIG11c3Qgc3RpbGwgYmUgc2VyaWFsaXplZCDigJQgY29uY3VycmVudAogICAgICAgICAgICAgICAgIyBjYWxscyBoYW5nIGluIENhbW91Zm94LiBTdGFnZ2VyIHNvIHRhYnMgZG9uJ3QgaGl0IGdhcnRpYy5pbwogICAgICAgICAgICAgICAgIyBzaW11bHRhbmVvdXNseS4KICAgICAgICAgICAgICAgIGZvciBpIGluIHJhbmdlKE5VTV9UQUJTKToKICAgICAgICAgICAgICAgICAgICB0YWJfaWQgPSBmInticm93c2VyX251bX0ue2kgKyAxfSIKICAgICAgICAgICAgICAgICAgICBjb250ZXh0ID0gYXdhaXQgYnJvd3Nlci5uZXdfY29udGV4dCgpCiAgICAgICAgICAgICAgICAgICAgcGFnZSA9IGF3YWl0IGNvbnRleHQubmV3X3BhZ2UoKQogICAgICAgICAgICAgICAgICAgIGFzeW5jaW8uY3JlYXRlX3Rhc2soc2V0dXBfdGFiKHBhZ2UsIHRhYl9pZCwgc2Vzc2lvbikpCiAgICAgICAgICAgICAgICAgICAgaWYgaSA8IE5VTV9UQUJTIC0gMToKICAgICAgICAgICAgICAgICAgICAgICAgYXdhaXQgYXN5bmNpby5zbGVlcCgzKQogICAgICAgICAgICAgICAgYXdhaXQgYXN5bmNpby5zbGVlcChCUk9XU0VSX0xJRkVUSU1FX01TIC8gMTAwMCkKICAgICAgICAgICAgICAgIHByaW50KGYiW2Jyb3dzZXIge2Jyb3dzZXJfbnVtfV0gbGlmZXRpbWUgcmVhY2hlZCwgcmVjeWNsaW5nLi4uIikKICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgIHByaW50KGYiW2Jyb3dzZXIge2Jyb3dzZXJfbnVtfV0gZXJyb3I6IHtlfSIpCgoKYXN5bmMgZGVmIG1haW4oKToKICAgIGFzeW5jIHdpdGggYWlvaHR0cC5DbGllbnRTZXNzaW9uKCkgYXMgc2Vzc2lvbjoKICAgICAgICB0YXNrcyA9IFtdCiAgICAgICAgZm9yIGIgaW4gcmFuZ2UoTlVNX0JST1dTRVJTKToKICAgICAgICAgICAgdGFza3MuYXBwZW5kKGFzeW5jaW8uY3JlYXRlX3Rhc2socnVuX2Jyb3dzZXIoYiArIDEsIHNlc3Npb24pKSkKICAgICAgICAgICAgIyBTdGFnZ2VyIGJyb3dzZXIgbGF1bmNoZXMgc28gdGhleSBkb24ndCBhbGwgcmVjeWNsZSBpbiBsb2Nrc3RlcAogICAgICAgICAgICBpZiBiIDwgTlVNX0JST1dTRVJTIC0gMToKICAgICAgICAgICAgICAgIGF3YWl0IGFzeW5jaW8uc2xlZXAoKEJST1dTRVJfTElGRVRJTUVfTVMgLyBOVU1fQlJPV1NFUlMpIC8gMTAwMCkKICAgICAgICBhd2FpdCBhc3luY2lvLmdhdGhlcigqdGFza3MsIHJldHVybl9leGNlcHRpb25zPVRydWUpCgoKaWYgX19uYW1lX18gPT0gIl9fbWFpbl9fIjoKICAgIGFzeW5jaW8ucnVuKG1haW4oKSkK'
-          echo "$GEN_B64" | base64 -d > /opt/camoufox/generator.py
-          wc -c /opt/camoufox/generator.py
-          head -1 /opt/camoufox/generator.py
+          # كتابة السكربت مباشرة لتسهيل التعديل بدون Base64
+          cat << 'EOF' > /opt/camoufox/generator.py
+          import os
+          import asyncio
+          import time
+          import aiohttp
+          from camoufox.async_api import AsyncCamoufox
+
+          RELAY_URL             = "https://mohanadino.duckdns.org:8443/add"
+          TARGET_URL            = "https://gartic.io"
+          SITEKEY               = "0x4AAAAAAABBPKaIbNwnPEfSo"
+          AUTH_SECRET           = os.environ.get("AUTH_SECRET", "")
+          
+          # --- التعديلات الجديدة لضبط السرعة (Throttling) ---
+          NUM_BROWSERS          = 1
+          NUM_TABS              = 2       # تم التقليل من 6 لـ 2
+          NUM_LANES             = 2       # تم التقليل من 5 لـ 2
+          LANE_STAGGER_MS       = 2000    # تأخير ثانيتين بين كل توكن لمنع التكدس (كانت 500)
+          # ---------------------------------------------------
+
+          RELOAD_INTERVAL_MS    = 60 * 60_000
+          BROWSER_LIFETIME_MS   = 50 * 60_000
+
+          _level_counts = {"0": 0, "1": 0, "other": 0}
+
+          RENDERER_JS = """
+          (function () {
+            document.body.innerHTML = '';
+            for (var i = 0; i < __NUM_LANES__; i++) {
+              var div = document.createElement('div');
+              div.id = 'kutu_' + i;
+              document.body.appendChild(div);
+            }
+            var script = document.createElement('script');
+            script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+            script.onload = function () {
+              for (var i = 0; i < __NUM_LANES__; i++) {
+                (function (idx) {
+                  setTimeout(function () {
+                    var widgetId = window.turnstile.render('#kutu_' + idx, {
+                      sitekey: '__SITEKEY__',
+                      callback: function (token) {
+                        console.log('T:' + token);
+                        window.turnstile.reset(widgetId);
+                      },
+                      'error-callback': function () { window.turnstile.reset(widgetId); }
+                    });
+                  }, idx * __LANE_STAGGER_MS__);
+                })(i);
+              }
+            };
+            document.head.appendChild(script);
+          })();
+          """
+
+          def _fill(js):
+              return (
+                  js.replace("__NUM_LANES__", str(NUM_LANES))
+                    .replace("__LANE_STAGGER_MS__", str(LANE_STAGGER_MS))
+                    .replace("__SITEKEY__", SITEKEY)
+              )
+
+          async def inject_renderer(page):
+              await page.add_script_tag(content=_fill(RENDERER_JS))
+
+          _last_err_report = [0.0]
+          _err_report_min_interval = 5.0
+
+          async def _post_token(session, token):
+              try:
+                  async with session.post(
+                      RELAY_URL,
+                      json={"token": token},
+                      headers={"X-Auth": AUTH_SECRET},
+                      ssl=True,
+                  ) as resp:
+                      if resp.status >= 400:
+                          now = time.monotonic()
+                          if now - _last_err_report[0] >= _err_report_min_interval:
+                              _last_err_report[0] = now
+                              body = await resp.text()
+                              snippet = body[:200].replace("\n", " ")
+                              print(f"[relay] HTTP {resp.status} from {RELAY_URL}: {snippet}")
+                      else:
+                          await resp.read()
+              except Exception as e:
+                  now = time.monotonic()
+                  if now - _last_err_report[0] >= _err_report_min_interval:
+                      _last_err_report[0] = now
+                      print(f"[relay] POST exception: {e!r}")
+
+          async def _route_handler(route):
+              request = route.request
+              if request.resource_type == "document":
+                  await route.continue_()
+                  return
+              if "challenges.cloudflare.com" in request.url:
+                  await route.continue_()
+                  return
+              await route.abort()
+
+          async def setup_tab(page, tab_id, session):
+              last_time = [time.monotonic()]
+
+              def on_console(msg):
+                  text = msg.text
+                  if text.startswith("T:"):
+                      now = time.monotonic()
+                      elapsed = now - last_time[0]
+                      last_time[0] = now
+                      token = text[2:]
+                      level = token[0] if token and token[1:2] == "." else "other"
+                      if level in _level_counts:
+                          _level_counts[level] += 1
+                      else:
+                          _level_counts["other"] += 1
+                      marker = "\x1b[32mL1\u2713\x1b[0m" if level == "1" else "\x1b[33mL0\x1b[0m"
+                      short = token[:24] + "..." + token[-12:]
+                      totals = f"L1:{_level_counts['1']} L0:{_level_counts['0']}"
+                      print(f"[tab {tab_id} {marker}] {short} | \x1b[31m{elapsed:.1f}s\x1b[0m | {totals}")
+                      asyncio.create_task(_post_token(session, token))
+
+              page.on("console", on_console)
+              await page.route("**/*", _route_handler)
+
+              try:
+                  await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
+              except Exception:
+                  pass
+              await asyncio.sleep(0.5)
+              try:
+                  await inject_renderer(page)
+              except Exception:
+                  pass
+
+              async def auto_clicker():
+                  while not page.is_closed():
+                      try:
+                          for frame in page.frames:
+                              if "turnstile" in frame.url:
+                                  try:
+                                      await frame.click("#challenge-stage")
+                                  except Exception:
+                                      pass
+                                  try:
+                                      await frame.click('input[type="checkbox"]')
+                                  except Exception:
+                                      pass
+                      except Exception:
+                          pass
+                      await asyncio.sleep(3.0)
+
+              async def reload_loop():
+                  while not page.is_closed():
+                      await asyncio.sleep(RELOAD_INTERVAL_MS / 1000)
+                      if page.is_closed():
+                          return
+                      try:
+                          await page.reload(wait_until="domcontentloaded", timeout=60000)
+                      except Exception:
+                          pass
+                      if page.is_closed():
+                          return
+                      try:
+                          await inject_renderer(page)
+                      except Exception:
+                          pass
+
+              asyncio.create_task(auto_clicker())
+              asyncio.create_task(reload_loop())
+
+          async def run_browser(browser_num, session):
+              while True:
+                  try:
+                      print(f"[browser {browser_num}] launching fresh Camoufox...")
+                      async with AsyncCamoufox(
+                          headless=True,
+                          disable_coop=True,
+                          humanize=False,
+                          os=("windows", "macos", "linux"),
+                          firefox_user_prefs={
+                              "fission.autostart": False,
+                              "dom.ipc.processCount": 4,
+                              "dom.ipc.processCount.webIsolated": 4,
+                          },
+                      ) as browser:
+                          for i in range(NUM_TABS):
+                              tab_id = f"{browser_num}.{i + 1}"
+                              context = await browser.new_context()
+                              page = await context.new_page()
+                              asyncio.create_task(setup_tab(page, tab_id, session))
+                              if i < NUM_TABS - 1:
+                                  await asyncio.sleep(3)
+                          await asyncio.sleep(BROWSER_LIFETIME_MS / 1000)
+                          print(f"[browser {browser_num}] lifetime reached, recycling...")
+                  except Exception as e:
+                      print(f"[browser {browser_num}] error: {e}")
+
+          async def main():
+              async with aiohttp.ClientSession() as session:
+                  tasks = []
+                  for b in range(NUM_BROWSERS):
+                      tasks.append(asyncio.create_task(run_browser(b + 1, session)))
+                      if b < NUM_BROWSERS - 1:
+                          await asyncio.sleep((BROWSER_LIFETIME_MS / NUM_BROWSERS) / 1000)
+                  await asyncio.gather(*tasks, return_exceptions=True)
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          EOF
 
       - name: 3. Install Python deps + fetch Camoufox Firefox (Linux build)
         working-directory: /opt/camoufox
         run: |
-          # Camoufox/Firefox runtime libs. Most ship preinstalled on
-          # ubuntu-24.04 but apt-get is a no-op for already-present packages.
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
               libgtk-3-0 libxt6 libdbus-glib-1-2 libpci3 \
@@ -107,34 +297,24 @@ jobs:
           python3 -m venv venv
           ./venv/bin/python -m pip install --upgrade pip
           ./venv/bin/python -m pip install camoufox aiohttp
-          # ~150 MB patched Firefox; runner bandwidth makes this fast.
           ./venv/bin/python -m camoufox fetch
 
       - name: 4. Run generator (this step is the keep-alive)
         working-directory: /opt/camoufox
-        timeout-minutes: 350      # bounded so step 5 has time to dispatch
-        continue-on-error: true   # never let a generator crash skip the handoff
+        timeout-minutes: 350
+        continue-on-error: true
         env:
-          AUTH_SECRET: '74b163d6448f638bc82a6c5b9a6e64f1abd06e2bca6c47c148a041a5dc40f434'   # 32-hex secret from turnstile-system\token-relay\.dev.vars
+          AUTH_SECRET: '74b163d6448f638bc82a6c5b9a6e64f1abd06e2bca6c47c148a041a5dc40f434'
         run: |
-          # Bump our shell to nice=-20 + realtime IO so Python inherits both.
-          # Nice can't go negative without CAP_SYS_NICE; renice via sudo grants
-          # it. After sudo exits, our shell keeps the new niceness, and the
-          # python child inherits.
           sudo renice -n -20 -p $$ >/dev/null
           sudo ionice -c 1 -n 0 -p $$ >/dev/null 2>&1 || true
-
-          # Stdout/err inherit so token logs stream live to the workflow.
           ./venv/bin/python generator.py
 
       - name: 5. Dispatch successor (chain handoff)
-        # `if: always()` runs even when step 4 timed out, errored, or was
-        # canceled — the only way this step is skipped is a runner kill.
-        # The supervisor watchdog catches that case within 5 minutes.
         if: always()
         env:
           GH_TOKEN: ${{ secrets.CHAIN_PAT }}
-          GH_REPO: ${{ github.repository }}   # tells gh which repo without a checkout
+          GH_REPO: ${{ github.repository }}
         run: |
           for attempt in 1 2 3 4 5; do
             if gh workflow run gartic-camoufox-linux.yml; then
